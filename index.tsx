@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -44,8 +43,15 @@ interface SystemData {
   // 1.2 Detection (Granular)
   avgDetectionTime: number; // For record
   maxDetectionTime: number; // For record
-  accuracyRate: 10 | 7 | 3 | 0; // 10=99%+, 7=95%+, 3=90%+, 0=<90%
-  discoveryRate: 10 | 7 | 3 | 0; // 10=99%+, 7=95%+, 3=85%+, 0=<85%
+  
+  // New: 1.2.1 Accuracy Calculation inputs
+  alertTotalCount: number;
+  alertFalseCount: number;
+
+  // New: 1.2.2 Discovery Calculation inputs
+  faultTotalCount: number;
+  faultDetectedCount: number;
+
   earlyDetectionCount: number; // Bonus
 
   // 1.3 Alerts
@@ -102,8 +108,12 @@ const INITIAL_SYSTEM: SystemData = {
   documentedItems: 5,
   avgDetectionTime: 5,
   maxDetectionTime: 5,
-  accuracyRate: 7,
-  discoveryRate: 7,
+  
+  alertTotalCount: 100,
+  alertFalseCount: 2,
+  faultTotalCount: 0,
+  faultDetectedCount: 0,
+
   earlyDetectionCount: 0,
   opsLeadConfigured: true,
   dataMonitorConfigured: 'full',
@@ -152,7 +162,11 @@ const calculateScore = (data: SystemData, tools: MonitorTool[]) => {
     part4: 0, // 团队 (10)
     total: 0,
     missingCaps: [] as MonitorCategory[],
-    packageLevel: 'full' as string
+    packageLevel: 'full' as string,
+    accuracyRatePct: 100,
+    discoveryRatePct: 100,
+    accuracyScore: 10,
+    discoveryScore: 10
   };
 
   // --- 1.1.1 Package Coverage ---
@@ -204,11 +218,37 @@ const calculateScore = (data: SystemData, tools: MonitorTool[]) => {
   details.part1 = Math.min(60, Math.round((score1_1 + score1_2 + score1_3) * 10) / 10);
 
   // --- 1.2 Detection (20 分) ---
-  // PDF: 1.2.1 Accuracy (10), 1.2.2 Discovery (10). Total 20.
+  
+  // 1.2.1 Accuracy: (Total - False) / Total
+  const totalAlerts = data.alertTotalCount || 0;
+  const falseAlerts = data.alertFalseCount || 0;
+  // If no alerts, we assume 100% accuracy (or technically N/A, but 10 points is standard for "clean")
+  const accPct = totalAlerts > 0 ? Math.max(0, ((totalAlerts - falseAlerts) / totalAlerts) * 100) : 100;
+  details.accuracyRatePct = accPct;
+  
+  let accScore = 0;
+  if (accPct >= 99) accScore = 10;
+  else if (accPct >= 95) accScore = 7;
+  else if (accPct >= 90) accScore = 3;
+  else accScore = 0;
+  details.accuracyScore = accScore;
+
+  // 1.2.2 Discovery: Detected / Total Faults
+  const totalFaults = data.faultTotalCount || 0;
+  const detectedFaults = data.faultDetectedCount || 0;
+  // If no faults occurred, we assume perfect coverage (10 points)
+  const discPct = totalFaults > 0 ? Math.min(100, (detectedFaults / totalFaults) * 100) : 100;
+  details.discoveryRatePct = discPct;
+
+  let discScore = 0;
+  if (discPct >= 99) discScore = 10;
+  else if (discPct >= 95) discScore = 7;
+  else if (discPct >= 85) discScore = 3;
+  else discScore = 0;
+  details.discoveryScore = discScore;
+
   const earlyBonus = Math.min(5, data.earlyDetectionCount * 1);
-  const accuracyScore = Number(data.accuracyRate);
-  const discoveryScore = Number(data.discoveryRate);
-  details.part2 = Math.min(20, accuracyScore + discoveryScore + earlyBonus);
+  details.part2 = Math.min(20, accScore + discScore + earlyBonus);
 
   // --- 1.3 Alerts (10 分) ---
   let score3 = 10;
@@ -385,6 +425,14 @@ const App = () => {
         toolCapabilities: { ...activeSystem.toolCapabilities, [toolId]: tool?.defaultCapabilities || [] }
       });
     }
+  };
+
+  // Helper for progress bar color
+  const getProgressColor = (pct: number) => {
+    if (pct >= 99) return 'bg-green-500';
+    if (pct >= 95) return 'bg-blue-500';
+    if (pct >= 85) return 'bg-orange-400';
+    return 'bg-red-500';
   };
 
   return (
@@ -571,28 +619,80 @@ const App = () => {
               {/* Accordion 2: Detection (20 pts) */}
               <Accordion title="2. 故障检测能力" score={scores.part2} total={20} defaultOpen={true}>
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div>
-                       <div className="mb-4">
-                          <label className="block mb-2 font-medium text-sm">监控准确率 (10分)</label>
-                          <select value={activeSystem.accuracyRate} onChange={e => updateSystem({accuracyRate: Number(e.target.value) as any})} className="w-full border p-2 rounded text-sm bg-white">
-                             <option value={10}>10分 - 极高准确率 [99%, 100%)</option>
-                             <option value={7}>7分 - 高准确率 [95%, 99%)</option>
-                             <option value={3}>3分 - 中等准确率 [90%, 95%)</option>
-                             <option value={0}>0分 - 低准确率 &lt;90%</option>
-                          </select>
+                    <div className="space-y-6">
+                       
+                       {/* Accuracy Card */}
+                       <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm relative overflow-hidden">
+                          <div className="flex justify-between items-center mb-4">
+                             <h4 className="font-bold text-slate-700 text-sm">监控准确率 (10分)</h4>
+                             <span className="text-xs text-slate-400">告警越准，分数越高</span>
+                          </div>
+                          <div className="flex gap-4 items-center">
+                             <div className="flex-1 space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                   <span className="text-slate-500">告警总数</span>
+                                   <input type="number" min="0" value={activeSystem.alertTotalCount ?? 0} onChange={e => updateSystem({alertTotalCount: Math.max(0, parseInt(e.target.value)||0)})} 
+                                      className="w-16 text-right border rounded px-1 py-0.5 bg-slate-50 focus:bg-white transition-colors" />
+                                </div>
+                                <div className="flex items-center justify-between text-sm">
+                                   <span className="text-slate-500">误告警数</span>
+                                   <input type="number" min="0" value={activeSystem.alertFalseCount ?? 0} onChange={e => updateSystem({alertFalseCount: Math.max(0, parseInt(e.target.value)||0)})} 
+                                      className="w-16 text-right border rounded px-1 py-0.5 bg-slate-50 focus:bg-white transition-colors text-red-600" />
+                                </div>
+                             </div>
+                             <div className="w-px h-12 bg-slate-100 mx-2"></div>
+                             <div className="w-24 text-center">
+                                <div className={`text-2xl font-black ${scores.accuracyRatePct >= 95 ? 'text-green-600' : scores.accuracyRatePct >= 90 ? 'text-blue-600' : 'text-red-500'}`}>
+                                   {scores.accuracyRatePct.toFixed(1)}<span className="text-sm font-normal">%</span>
+                                </div>
+                                <div className="text-xs font-bold bg-slate-100 rounded-full px-2 py-0.5 inline-block mt-1">
+                                   得分: {scores.accuracyScore}
+                                </div>
+                             </div>
+                          </div>
+                          <div className="h-1 w-full bg-slate-100 mt-4 rounded-full overflow-hidden">
+                             <div className={`h-full ${getProgressColor(scores.accuracyRatePct)} transition-all duration-500`} style={{width: `${scores.accuracyRatePct}%`}}></div>
+                          </div>
                        </div>
-                       <div>
-                          <label className="block mb-2 font-medium text-sm">故障发现率 (10分)</label>
-                          <select value={activeSystem.discoveryRate} onChange={e => updateSystem({discoveryRate: Number(e.target.value) as any})} className="w-full border p-2 rounded text-sm bg-white">
-                             <option value={10}>10分 - 非常高 [99%, 100%)</option>
-                             <option value={7}>7分 - 较高 [95%, 99%)</option>
-                             <option value={3}>3分 - 中等 [85%, 95%)</option>
-                             <option value={0}>0分 - 低 &lt;85%</option>
-                          </select>
+
+                       {/* Discovery Card */}
+                       <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm relative overflow-hidden">
+                          <div className="flex justify-between items-center mb-4">
+                             <h4 className="font-bold text-slate-700 text-sm">故障发现率 (10分)</h4>
+                             <span className="text-xs text-slate-400">漏报越少，分数越高</span>
+                          </div>
+                          <div className="flex gap-4 items-center">
+                             <div className="flex-1 space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                   <span className="text-slate-500">故障总数</span>
+                                   <input type="number" min="0" value={activeSystem.faultTotalCount ?? 0} onChange={e => updateSystem({faultTotalCount: Math.max(0, parseInt(e.target.value)||0)})} 
+                                      className="w-16 text-right border rounded px-1 py-0.5 bg-slate-50 focus:bg-white transition-colors" />
+                                </div>
+                                <div className="flex items-center justify-between text-sm">
+                                   <span className="text-slate-500">监控发现</span>
+                                   <input type="number" min="0" value={activeSystem.faultDetectedCount ?? 0} onChange={e => updateSystem({faultDetectedCount: Math.max(0, parseInt(e.target.value)||0)})} 
+                                      className="w-16 text-right border rounded px-1 py-0.5 bg-slate-50 focus:bg-white transition-colors text-blue-600" />
+                                </div>
+                             </div>
+                             <div className="w-px h-12 bg-slate-100 mx-2"></div>
+                             <div className="w-24 text-center">
+                                <div className={`text-2xl font-black ${scores.discoveryRatePct >= 95 ? 'text-green-600' : scores.discoveryRatePct >= 85 ? 'text-blue-600' : 'text-red-500'}`}>
+                                   {scores.discoveryRatePct.toFixed(1)}<span className="text-sm font-normal">%</span>
+                                </div>
+                                <div className="text-xs font-bold bg-slate-100 rounded-full px-2 py-0.5 inline-block mt-1">
+                                   得分: {scores.discoveryScore}
+                                </div>
+                             </div>
+                          </div>
+                          <div className="h-1 w-full bg-slate-100 mt-4 rounded-full overflow-hidden">
+                             <div className={`h-full ${getProgressColor(scores.discoveryRatePct)} transition-all duration-500`} style={{width: `${scores.discoveryRatePct}%`}}></div>
+                          </div>
                        </div>
+
                     </div>
-                    <div className="bg-slate-50 p-4 rounded text-sm space-y-4">
-                       <h4 className="font-bold text-slate-500 text-xs uppercase">检测数据记录 (不直接计分)</h4>
+                    
+                    <div className="bg-slate-50 p-4 rounded text-sm space-y-4 h-fit">
+                       <h4 className="font-bold text-slate-500 text-xs uppercase">检测效能记录 (不直接计分)</h4>
                        <div className="grid grid-cols-2 gap-4">
                           <label>
                              <span className="block text-slate-500 text-xs mb-1">平均检测时长(分)</span>
